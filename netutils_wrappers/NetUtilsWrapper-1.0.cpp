@@ -33,11 +33,14 @@
 #define SYSTEM_DIRNAME  "/system/bin/"
 
 #define OEM_IFACE "[^ ]*oem[0-9]+"
-#define RMNET_IFACE "(r_)?rmnet_(data)?[0-9]+"
+#define RMNET_IFACE "(r_)?rmnet(_data|_usb)?[0-9]+"
 #define CCMNI_IFACE "cc(3)?mni[0-9]+"
 #define WWAN_IFACE "wwan[0-9]+"
 #define VENDOR_IFACE "(" OEM_IFACE "|" RMNET_IFACE "|" CCMNI_IFACE "|" WWAN_IFACE ")"
 #define VENDOR_CHAIN "(oem_.*|nm_.*|qcom_.*)"
+// Legacy qcom netmgrd QoS chains: two fixed POSTROUTING hooks and one chain per
+// flow, named <rmnet interface>_0x<flow id>.<ip version>.
+#define QOS_CHAIN "(qcom_qos_(filter|reset)_POSTROUTING|" RMNET_IFACE "_0x[0-9a-f]+\\.[0-9]+)"
 
 // List of net utils wrapped by this program
 // The list MUST be in descending order of string length
@@ -77,6 +80,13 @@ const char *EXPECTED_REGEXPS[] = {
     CMD "ip(6)?tables -w .* -j " VENDOR_CHAIN,
     CMD "iptables -w -t mangle -[AD] PREROUTING -m socket --nowildcard --restore-skmark -j ACCEPT",
     CMD "ndc network interface (add|remove) oem[0-9]+$",  // Invalid command: no interface removed.
+
+    // Legacy qcom netmgrd builds its mangle QoS chains without -w and drops outgoing TCP
+    // resets for carriers that require it.
+    CMD "ip(6)?tables -t mangle -[ADIFNX] " QOS_CHAIN "( |$)",
+    CMD "ip(6)?tables -t mangle -[AD] POSTROUTING -j qcom_qos_(filter|reset)_POSTROUTING$",
+    CMD "iptables -[AD] OUTPUT -p tcp --tcp-flags RST RST -j DROP -m comment --comment "
+        "Drop outgoing TCP resets$",
 #undef CMD
 };
 

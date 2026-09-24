@@ -55,6 +55,24 @@ std::vector<Command> COMMANDS = {
     {VALID,   "/system/bin/ndc network interface add handle42966108894 wwan0"},
     {INVALID, "/system/bin/ndc network interface add handle42966108894"},
     {VALID,   "/system/bin/ip xfrm state"},
+    {VALID,   "/system/bin/tc qdisc add dev rmnet0 root handle 1:0 htb r2q 1 default 1"},
+    {VALID,   "/system/bin/iptables -w -t filter -I FORWARD -i rmnet0 -o wlan0 -j ACCEPT"},
+    {VALID,   "/system/bin/ndc network interface add oem1 rmnet_usb0"},
+    {INVALID, "/system/bin/tc qdisc add dev wlan0 root handle 1:0 htb r2q 1 default 1"},
+    {INVALID, "/system/bin/iptables -w -t filter -I FORWARD -i rmnetx -o wlan0 -j ACCEPT"},
+    {VALID,   "/system/bin/iptables -t mangle -N qcom_qos_filter_POSTROUTING"},
+    {VALID,   "/system/bin/ip6tables -t mangle -A POSTROUTING -j qcom_qos_reset_POSTROUTING"},
+    {VALID,   "/system/bin/iptables -t mangle -N rmnet0_0x0000000a.4"},
+    {VALID,   "/system/bin/iptables -t mangle -I qcom_qos_filter_POSTROUTING 1 -j rmnet0_0x0000000a.4"},
+    {VALID,   "/system/bin/ip6tables -t mangle -A rmnet_usb0_0x00000001.6 -j MARK --set-mark 1"},
+    {VALID,   "/system/bin/iptables -t mangle -X rmnet7_0x0000ffff.4"},
+    {INVALID, "/system/bin/iptables -t filter -N rmnet0_0x0000000a.4"},
+    {INVALID, "/system/bin/iptables -t mangle -A POSTROUTING -j ACCEPT"},
+    {INVALID, "/system/bin/iptables -t mangle -F POSTROUTING"},
+    {INVALID, "/system/bin/iptables -t mangle -N wlan0_0x0000000a.4"},
+    {VALID,   "/system/bin/iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP -m comment "
+              "--comment Drop outgoing TCP resets"},
+    {INVALID, "/system/bin/iptables -A OUTPUT -j DROP"},
 };
 
 TEST(NetUtilsWrapperTest10, TestCommands) {
