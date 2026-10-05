@@ -67,7 +67,6 @@
 #include "netdutils/Slice.h"
 #include "netdutils/Syscalls.h"
 
-using android::net::INetd;
 using android::netdutils::DumpWriter;
 using android::netdutils::Fd;
 using android::netdutils::ScopedIndent;
