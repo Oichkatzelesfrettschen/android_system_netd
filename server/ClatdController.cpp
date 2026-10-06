@@ -73,6 +73,12 @@ namespace net {
 void ClatdController::init(void) {
     std::lock_guard guard(mutex);
 
+    // Without eBPF clatd translates every packet in userspace and the BPF maps stay invalid.
+    if (!bpf::isBpfSupported()) {
+        ALOGI("eBPF unsupported, disabling clat ebpf.");
+        return;
+    }
+
     int rv = getClatEgress4MapFd();
     if (rv < 0) {
         ALOGE("getClatEgress4MapFd() failure: %s", strerror(-rv));
@@ -198,6 +204,8 @@ int ClatdController::generateIpv6Address(const char* iface, const in_addr v4,
 }
 
 void ClatdController::maybeStartBpf(const ClatdTracker& tracker) {
+    if (!bpf::isBpfSupported()) return;
+
     auto isEthernet = android::net::isEthernet(tracker.iface);
     if (!isEthernet.ok()) {
         ALOGE("isEthernet(%s[%d]) failure: %s", tracker.iface, tracker.ifIndex,
@@ -332,6 +340,8 @@ void ClatdController::setIptablesDropRule(bool add, const char* iface, const cha
 }
 
 void ClatdController::maybeStopBpf(const ClatdTracker& tracker) {
+    if (!bpf::isBpfSupported()) return;
+
     int rv = tcFilterDelDevIngressClatIpv6(tracker.ifIndex);
     if (rv < 0) {
         ALOGE("tcFilterDelDevIngressClatIpv6(%d[%s]) failure: %s", tracker.ifIndex, tracker.iface,
