@@ -32,6 +32,8 @@ public:
 
     BandwidthController();
 
+    void setBpfEnabled(bool isEnabled);
+
     int setupIptablesHooks();
 
     int enableBandwidthControl();
@@ -132,6 +134,10 @@ public:
 
     std::map<std::string, QuotaInfo> mQuotaIfaces;
     std::set<std::string> mSharedQuotaIfaces;
+
+    // False selects xt_qtaguid accounting and xt_owner happy/penalty box rules in place of
+    // the xt_bpf programs and the TrafficController uid owner map.
+    bool mBpfSupported = true;
 };
 
 #endif
