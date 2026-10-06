@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -50,6 +51,7 @@
 #include <log/log.h>
 
 #include <netdutils/Syscalls.h>
+#include <netdutils/UidConstants.h>
 #include "BandwidthController.h"
 #include "Controllers.h"
 #include "FirewallController.h" /* For makeCriticalCommands */
@@ -83,6 +85,9 @@ namespace {
 
 const char ALERT_GLOBAL_NAME[] = "globalAlert";
 const std::string NEW_CHAIN_COMMAND = "-N ";
+
+const char NAUGHTY_CHAIN[] = "bw_penalty_box";
+const char NICE_CHAIN[] = "bw_happy_box";
 
 /**
  * Some comments about the rules:
@@ -147,6 +152,8 @@ const std::string NEW_CHAIN_COMMAND = "-N ";
  */
 
 const std::string COMMIT_AND_CLOSE = "COMMIT\n";
+const std::string HAPPY_BOX_MATCH_ALLOWLIST_COMMAND =
+        StringPrintf("-I bw_happy_box -m owner --uid-owner %d-%d -j RETURN", 0, MAX_SYSTEM_UID);
 const std::string BPF_PENALTY_BOX_MATCH_DENYLIST_COMMAND = StringPrintf(
         "-I bw_penalty_box -m bpf --object-pinned %s -j REJECT", XT_BPF_DENYLIST_PROG_PATH);
 
@@ -206,7 +213,9 @@ static const uint32_t uidBillingMask = Fwmark::getUidBillingMask();
  * See go/ipsec-data-accounting for more information.
  */
 
-std::vector<std::string> getBasicAccountingCommands() {
+std::vector<std::string> getBasicAccountingCommands(const bool useBpf) {
+    // An empty string marks a rule that only one of the two accounting paths uses; all of them
+    // are erased before the commands reach iptables-restore.
     // clang-format off
     std::vector<std::string> ipt_basic_accounting_commands = {
             "*filter",
@@ -216,14 +225,29 @@ std::vector<std::string> getBasicAccountingCommands() {
             "-A bw_INPUT -p esp -j RETURN",
             StringPrintf("-A bw_INPUT -m mark --mark 0x%x/0x%x -j RETURN", uidBillingMask,
                          uidBillingMask),
+            // Ingress application UID accounting through xt_qtaguid; with eBPF the cgroup
+            // programs account instead.
+            useBpf ? "" : "-A bw_INPUT -m owner --socket-exists",
             StringPrintf("-A bw_INPUT -j MARK --or-mark 0x%x", uidBillingMask),
             "-A bw_OUTPUT -j bw_global_alert",
+            // Prevents IPSec double counting (Tunnel mode and Transport mode,
+            // respectively)
+            useBpf ? "" : "-A bw_OUTPUT -o " IPSEC_IFACE_PREFIX "+ -j RETURN",
+            useBpf ? "" : "-A bw_OUTPUT -m policy --pol ipsec --dir out -j RETURN",
+            // Clat traffic is already counted against the real UID on the stacked interface.
+            useBpf ? "" : "-A bw_OUTPUT -m owner --uid-owner clat -j RETURN",
+            // Egress application UID accounting through xt_qtaguid.
+            useBpf ? "" : "-A bw_OUTPUT -m owner --socket-exists",
             "-A bw_costly_shared -j bw_penalty_box",
-            ("-I bw_penalty_box -m bpf --object-pinned " XT_BPF_DENYLIST_PROG_PATH " -j REJECT"),
+            useBpf ? ("-I bw_penalty_box -m bpf --object-pinned " XT_BPF_DENYLIST_PROG_PATH
+                      " -j REJECT")
+                   : "",
             "-A bw_penalty_box -j bw_happy_box",
             "-A bw_happy_box -j bw_data_saver",
             "-A bw_data_saver -j RETURN",
-            ("-I bw_happy_box -m bpf --object-pinned " XT_BPF_ALLOWLIST_PROG_PATH " -j RETURN"),
+            useBpf ? ("-I bw_happy_box -m bpf --object-pinned " XT_BPF_ALLOWLIST_PROG_PATH
+                      " -j RETURN")
+                   : HAPPY_BOX_MATCH_ALLOWLIST_COMMAND,
             "COMMIT",
 
             "*raw",
@@ -242,7 +266,8 @@ std::vector<std::string> getBasicAccountingCommands() {
             //
             // Hence we will never double count and additional corrections are not needed.
             // We can simply take the sum of base and stacked (+20B/pkt) interface counts.
-            ("-A bw_raw_PREROUTING -m bpf --object-pinned " XT_BPF_INGRESS_PROG_PATH),
+            useBpf ? ("-A bw_raw_PREROUTING -m bpf --object-pinned " XT_BPF_INGRESS_PROG_PATH)
+                   : "-A bw_raw_PREROUTING -m owner --socket-exists",
             "COMMIT",
 
             "*mangle",
@@ -258,13 +283,22 @@ std::vector<std::string> getBasicAccountingCommands() {
             // This is egress interface accounting: we account 464xlat traffic only on
             // the clat interface (as offloaded packets never hit base interface's ip6tables)
             // and later sum base and stacked with overhead (+20B/pkt) in higher layers
-            ("-A bw_mangle_POSTROUTING -m bpf --object-pinned " XT_BPF_EGRESS_PROG_PATH),
+            useBpf ? ("-A bw_mangle_POSTROUTING -m bpf --object-pinned " XT_BPF_EGRESS_PROG_PATH)
+                   : "-A bw_mangle_POSTROUTING -m owner --socket-exists",
             COMMIT_AND_CLOSE};
     // clang-format on
+    ipt_basic_accounting_commands.erase(
+            std::remove(ipt_basic_accounting_commands.begin(), ipt_basic_accounting_commands.end(),
+                        ""),
+            ipt_basic_accounting_commands.end());
     return ipt_basic_accounting_commands;
 }
 
 }  // namespace
+
+void BandwidthController::setBpfEnabled(bool isEnabled) {
+    mBpfSupported = isEnabled;
+}
 
 BandwidthController::BandwidthController() {
 }
@@ -292,7 +326,7 @@ int BandwidthController::enableBandwidthControl() {
 
     flushCleanTables(false);
 
-    std::string commands = Join(getBasicAccountingCommands(), '\n');
+    std::string commands = Join(getBasicAccountingCommands(mBpfSupported), '\n');
     return iptablesRestoreFunction(V4V6, commands, nullptr);
 }
 
@@ -341,6 +375,18 @@ int BandwidthController::removeNiceApps(const std::vector<uint32_t>& appUids) {
 
 int BandwidthController::manipulateSpecialApps(const std::vector<uint32_t>& appUids,
                                                UidOwnerMatchType matchType, IptOp op) {
+    if (!mBpfSupported) {
+        const bool penalty = (matchType == PENALTY_BOX_MATCH);
+        const char* chain = penalty ? NAUGHTY_CHAIN : NICE_CHAIN;
+        const char* jump = jumpToString(penalty ? IptJumpReject : IptJumpReturn);
+        std::string cmd = "*filter\n";
+        for (uint32_t appUid : appUids) {
+            StringAppendF(&cmd, "%s %s -m owner --uid-owner %u%s\n", opToString(op), chain,
+                          appUid, jump);
+        }
+        StringAppendF(&cmd, "COMMIT\n");
+        return iptablesRestoreFunction(V4V6, cmd, nullptr);
+    }
     Status status = gCtls->trafficCtrl.updateUidOwnerMap(appUids, matchType, op);
     if (!isOk(status)) {
         ALOGE("unable to update the Bandwidth Uid Map: %s", toString(status).c_str());
