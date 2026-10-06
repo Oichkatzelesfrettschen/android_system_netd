@@ -92,8 +92,9 @@ FirewallController::FirewallController(void) : mMaxUid(discoverMaximumValidUid(k
 int FirewallController::setupIptablesHooks(void) {
     int res = flushRules();
 
-    // mUseBpfOwnerMatch should be removed, but it is still depended upon by test code.
-    mUseBpfOwnerMatch = true;
+    // Without eBPF the uid owner match runs on iptables child chains instead of the
+    // TrafficController uid owner map.
+    mUseBpfOwnerMatch = gCtls->trafficCtrl.getBpfEnabled();
     if (mUseBpfOwnerMatch) {
         return res;
     }
