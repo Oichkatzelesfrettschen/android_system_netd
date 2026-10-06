@@ -144,7 +144,7 @@ binder::Status asBinderStatus(const netdutils::Status& status) {
 }
 
 template <typename T>
-binder::Status asBinderStatus(const base::Result<T> result) {
+binder::Status asBinderStatus(const base::Result<T>& result) {
     if (result.ok()) return binder::Status::ok();
 
     return binder::Status::fromServiceSpecificError(result.error().code(),
